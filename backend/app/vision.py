@@ -6,8 +6,9 @@ from dataclasses import dataclass, field
 from io import BytesIO
 from typing import Any, Protocol
 
-from openai import OpenAI, OpenAIError
+from openai import APITimeoutError, OpenAI, OpenAIError
 from PIL import Image, ImageOps, UnidentifiedImageError
+from pydantic import ValidationError
 
 from backend.app.models import ExtractedLabel
 
@@ -31,6 +32,7 @@ Copy visible wording instead of interpreting or correcting it. Return null for e
 field that is absent, obscured, unreadable, or uncertain. If the image is blurry,
 angled, affected by glare, or only partly readable, return all fields you can read
 confidently and leave the rest null; do not fail the entire extraction.
+If the image is not an alcohol label, return all seven fields as null.
 
 For government_warning, copy the warning verbatim exactly as visible. Preserve its
 capitalization, punctuation, spelling, and wording. Do not repair OCR-like errors,
@@ -43,6 +45,18 @@ class VisionService(Protocol):
 
     def extract_label(self, image: bytes) -> ExtractedLabel:
         """Extract all confidently readable fields from one image."""
+
+
+class VisionServiceError(Exception):
+    """Controlled operational failure from the external vision provider."""
+
+
+class VisionTimeoutError(VisionServiceError):
+    """The vision provider did not respond within the configured deadline."""
+
+
+class VisionStructuredOutputError(VisionServiceError):
+    """The provider response could not be validated against ExtractedLabel."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,8 +185,14 @@ class OpenAIVisionService:
                 store=False,
                 timeout=self._api_timeout_seconds,
             )
-        except OpenAIError:
-            return ExtractedLabel()
+        except APITimeoutError as exc:
+            raise VisionTimeoutError("The vision provider timed out.") from exc
+        except ValidationError as exc:
+            raise VisionStructuredOutputError(
+                "The vision provider returned invalid structured output."
+            ) from exc
+        except OpenAIError as exc:
+            raise VisionServiceError("The vision provider request failed.") from exc
         return _defensive_extracted_label(getattr(response, "output_parsed", None))
 
 

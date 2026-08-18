@@ -19,6 +19,18 @@ ABV_TOLERANCE = Decimal("0.1")
 VOLUME_TOLERANCE_ML = Decimal("0.5")
 
 _NUMBER_PATTERN = re.compile(r"(?<!\w)(\d+(?:\.\d+)?)")
+_PERCENT_ABV_PATTERN = re.compile(
+    r"(?<!\w)(\d+(?:\.\d+)?)\s*(?:%|percent(?:age)?\b)",
+    re.IGNORECASE,
+)
+_MARKED_ABV_PATTERN = re.compile(
+    r"(?<!\w)(\d+(?:\.\d+)?)\s*(?:abv\b|alc\.?\s*/?\s*vol\.?)",
+    re.IGNORECASE,
+)
+_PROOF_PATTERN = re.compile(
+    r"(?<!\w)(\d+(?:\.\d+)?)\s*proof\b",
+    re.IGNORECASE,
+)
 _VOLUME_PATTERN = re.compile(
     r"(?P<value>\d+(?:\.\d+)?)\s*"
     r"(?P<unit>fluid\s*ounces?|fl\s*oz|ounces?|oz|"
@@ -158,9 +170,17 @@ def compare_country_of_origin(expected: str, extracted: str | None) -> FieldResu
     )
 
 
-def _parse_number(value: str) -> Decimal | None:
-    match = _NUMBER_PATTERN.search(value)
-    return Decimal(match.group(1)) if match else None
+def _parse_abv(value: str) -> Decimal | None:
+    # Prefer an explicitly marked ABV over another number such as proof.
+    for pattern in (_PERCENT_ABV_PATTERN, _MARKED_ABV_PATTERN):
+        if match := pattern.search(value):
+            return Decimal(match.group(1))
+
+    if proof_match := _PROOF_PATTERN.search(value):
+        return Decimal(proof_match.group(1)) / Decimal("2")
+
+    numbers = _NUMBER_PATTERN.findall(value)
+    return Decimal(numbers[0]) if len(numbers) == 1 else None
 
 
 def compare_alcohol_content(expected: str, extracted: str | None) -> FieldResult:
@@ -171,8 +191,8 @@ def compare_alcohol_content(expected: str, extracted: str | None) -> FieldResult
         return missing
 
     assert extracted is not None
-    expected_abv = _parse_number(expected)
-    extracted_abv = _parse_number(extracted)
+    expected_abv = _parse_abv(expected)
+    extracted_abv = _parse_abv(extracted)
     if expected_abv is None or extracted_abv is None:
         return FieldResult(
             field=FieldName.ALCOHOL_CONTENT,

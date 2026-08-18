@@ -4,7 +4,11 @@ import argparse
 import os
 from pathlib import Path
 
-from backend.app.vision import OpenAIVisionService
+from backend.app.vision import (
+    OpenAIVisionService,
+    VisionServiceError,
+    VisionTimeoutError,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,7 +28,14 @@ def main() -> int:
         print(f"Sample image does not exist: {args.image}")
         return 2
 
-    extracted = OpenAIVisionService().extract_label(args.image.read_bytes())
+    try:
+        extracted = OpenAIVisionService().extract_label(args.image.read_bytes())
+    except VisionTimeoutError:
+        print("Label analysis timed out. Please try again.")
+        return 2
+    except VisionServiceError:
+        print("The label could not be analyzed. Please try again.")
+        return 2
     print(extracted.model_dump_json(indent=2))
     populated = any(
         value is not None for value in extracted.model_dump(mode="python").values()

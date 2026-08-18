@@ -90,6 +90,12 @@ def test_fuzzy_field_below_threshold_fails() -> None:
     assert result.score < FUZZY_MATCH_THRESHOLD
 
 
+def test_brand_case_only_difference_passes() -> None:
+    result = compare_brand_name("Old Harbor", "OLD HARBOR")
+
+    assert result.outcome is FieldOutcome.PASS
+
+
 @pytest.mark.parametrize(
     ("expected", "extracted"),
     [
@@ -117,6 +123,8 @@ def test_country_does_not_use_fuzzy_matching() -> None:
     ("expected", "extracted"),
     [
         ("45%", "45.0% Alc./Vol."),
+        ("45%", "45% Alc./Vol. (90 Proof)"),
+        ("45%", "90 Proof (45% Alc./Vol.)"),
         ("Alcohol 45.0 percent by volume", "44.9%"),
         ("12.5", "12.59% ABV"),
     ],
@@ -189,6 +197,24 @@ def test_government_warning_is_strictly_case_sensitive() -> None:
 
     assert result.outcome is FieldOutcome.FAIL
     assert result.score is None
+    assert result.extracted_value == extracted
+
+
+def test_government_warning_missing_colon_fails() -> None:
+    extracted = GOVERNMENT_WARNING.replace("GOVERNMENT WARNING:", "GOVERNMENT WARNING")
+
+    result = compare_government_warning(GOVERNMENT_WARNING, extracted)
+
+    assert result.outcome is FieldOutcome.FAIL
+    assert result.extracted_value == extracted
+
+
+def test_misread_warning_fails_and_preserves_extracted_text() -> None:
+    extracted = GOVERNMENT_WARNING.replace("health problems", "hea1th problems")
+
+    result = compare_government_warning(GOVERNMENT_WARNING, extracted)
+
+    assert result.outcome is FieldOutcome.FAIL
     assert result.extracted_value == extracted
 
 

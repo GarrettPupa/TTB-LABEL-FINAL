@@ -19,6 +19,22 @@ Open http://127.0.0.1:8000. The page calls `/health` and displays `ok`.
 
 Run the backend check with `uv run pytest`.
 
+## Verify a selected application
+
+The browser sends only the stable identifier selected from the application list. The
+backend reads the authoritative CSV row and its referenced image from the configured
+bucket; it does not accept application fields or image uploads from the browser.
+
+```bash
+curl -X POST http://127.0.0.1:8000/verify \
+  -H "Content-Type: application/json" \
+  --data '{"application_id":"TTB-0001"}'
+```
+
+Configure `APPLICATION_CSV_PATH`, `LABEL_IMAGE_BUCKET`, and `OPENAI_API_KEY` as
+environment variables before using the live endpoint. Successful responses contain
+the application identifier, overall verdict, seven field results, and `latency_ms`.
+
 ## Vision extraction smoke test
 
 The vision layer uses `gpt-5.6-luna` by default and the Responses API's typed
@@ -26,10 +42,9 @@ Structured Outputs. Images are oriented, bounded to a 1600-pixel longest edge,
 and JPEG-encoded in memory before the request. Override the model with
 `OPENAI_VISION_MODEL` when needed.
 
-Set the API key only in your environment, then run one local label image:
+Set `OPENAI_API_KEY` only in your shell environment, then run one local label image:
 
 ```powershell
-$env:OPENAI_API_KEY = "your-local-key"
 uv run python -m backend.scripts.run_vision_sample path\to\sample-label.jpg
 ```
 

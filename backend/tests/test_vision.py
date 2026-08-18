@@ -1,14 +1,20 @@
 from io import BytesIO
 from types import SimpleNamespace
 
-from openai import OpenAIError
+import httpx
+import pytest
+from openai import APITimeoutError, OpenAIError
 from PIL import Image, ImageFilter
+from pydantic import ValidationError
 
 from backend.app.models import ExtractedLabel
 from backend.app.vision import (
     EXTRACTION_PROMPT,
     FakeVisionService,
     OpenAIVisionService,
+    VisionServiceError,
+    VisionStructuredOutputError,
+    VisionTimeoutError,
     preprocess_image,
 )
 
@@ -37,13 +43,17 @@ class StubClient:
         self.responses = StubResponses(parsed)
 
 
-class FailingResponses:
+class RaisingResponses:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+
     def parse(self, **kwargs: object) -> None:
-        raise OpenAIError("temporary API failure")
+        raise self.error
 
 
-class FailingClient:
-    responses = FailingResponses()
+class RaisingClient:
+    def __init__(self, error: Exception) -> None:
+        self.responses = RaisingResponses(error)
 
 
 def test_preprocessing_downscales_and_reencodes_as_jpeg() -> None:
@@ -123,8 +133,34 @@ def test_absent_structured_output_returns_empty_extraction() -> None:
     assert result == ExtractedLabel()
 
 
-def test_api_failure_returns_empty_extraction_without_throwing() -> None:
-    service = OpenAIVisionService(client=FailingClient())
+def test_api_failure_raises_typed_service_error() -> None:
+    service = OpenAIVisionService(
+        client=RaisingClient(OpenAIError("temporary API failure"))
+    )
+
+    with pytest.raises(VisionServiceError):
+        service.extract_label(image_bytes((800, 400)))
+
+
+def test_model_timeout_raises_typed_timeout_error() -> None:
+    timeout = APITimeoutError(request=httpx.Request("POST", "https://example.test"))
+    service = OpenAIVisionService(client=RaisingClient(timeout))
+
+    with pytest.raises(VisionTimeoutError):
+        service.extract_label(image_bytes((800, 400)))
+
+
+def test_malformed_structured_output_raises_typed_parse_error() -> None:
+    with pytest.raises(ValidationError) as validation:
+        ExtractedLabel.model_validate({"brand_name": 123})
+    service = OpenAIVisionService(client=RaisingClient(validation.value))
+
+    with pytest.raises(VisionStructuredOutputError):
+        service.extract_label(image_bytes((800, 400)))
+
+
+def test_non_label_structured_result_is_all_null() -> None:
+    service = OpenAIVisionService(client=StubClient(ExtractedLabel()))
 
     result = service.extract_label(image_bytes((800, 400)))
 
@@ -170,3 +206,4 @@ def test_extraction_prompt_contains_quality_and_verbatim_requirements() -> None:
     assert "blurry" in EXTRACTION_PROMPT
     assert "glare" in EXTRACTION_PROMPT
     assert "angled" in EXTRACTION_PROMPT
+    assert "not an alcohol label" in EXTRACTION_PROMPT
