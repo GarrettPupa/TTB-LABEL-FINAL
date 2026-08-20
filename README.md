@@ -51,6 +51,10 @@ bucket, and a human reviewer who makes the final decision. It also assumes local
 CSV review storage is acceptable for a demo; there is no authentication,
 production database, or durable audit store.
 
+> **Render cold-start warning:** After a period of inactivity, Render may need to
+> start the service again. This can make the first AI verification feel slow and
+> take longer to complete than later requests.
+
 See [DESIGN.md](DESIGN.md) for the detailed flow, component responsibilities,
 comparison strategies, security boundaries, and future-production changes.
 
