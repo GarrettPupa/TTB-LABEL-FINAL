@@ -223,6 +223,17 @@ class ReviewDecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     decision: ReviewDecision
+    review_note: str = Field(default="", max_length=2000)
+    verification_item: BatchVerificationItem | None = None
+
+
+class SavedReviewResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    application_id: str
+    status: ReviewStatus
+    review_note: str
+    verification_item: BatchVerificationItem | None = None
 
 
 class ResetStatusesResponse(BaseModel):

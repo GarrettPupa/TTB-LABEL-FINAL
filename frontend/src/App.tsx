@@ -54,9 +54,18 @@ type BatchVerificationResponse = {
   concurrency_limit: number;
 };
 
+type SavedReview = {
+  application_id: string;
+  status: ReviewStatus;
+  review_note: string;
+  verification_item: BatchVerificationItem | null;
+};
+
 type ApiErrorBody = { error?: { message?: string } };
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? "").replace(/\/$/, "");
+const VERIFICATION_BUDGET_MS = 5000;
+const MAX_REVIEW_NOTE_LENGTH = 2000;
 
 const FIELD_LABELS = {
   brand_name: "Brand name",
@@ -103,6 +112,7 @@ async function requestJson<T>(path: string, options?: RequestInit): Promise<T> {
 type Route =
   | { page: "dashboard" }
   | { page: "review"; applicationId: string }
+  | { page: "completed"; applicationId: string }
   | {
       page: "results";
       applicationId: string;
@@ -111,6 +121,8 @@ type Route =
     };
 
 function getRoute(): Route {
+  const completed = window.location.pathname.match(/^\/completed\/([^/]+)\/?$/);
+  if (completed) return { page: "completed", applicationId: decodeURIComponent(completed[1]) };
   const review = window.location.pathname.match(/^\/review\/([^/]+)\/?$/);
   if (review) return { page: "review", applicationId: decodeURIComponent(review[1]) };
   const results = window.location.pathname.match(/^\/results\/([^/]+)\/?$/);
@@ -200,9 +212,9 @@ function Dashboard() {
           .filter((record) => record.status === "PENDING")
           .map((record) => record.application_id),
       );
-      setSelectedIds((current) => current.size > 0
-        ? new Set([...current].filter((applicationId) => selectableIds.has(applicationId)))
-        : selectableIds);
+      setSelectedIds((current) => new Set(
+        [...current].filter((applicationId) => selectableIds.has(applicationId)),
+      ));
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Applications could not be loaded.");
     } finally {
@@ -344,7 +356,9 @@ function Dashboard() {
                   <div><span className="mobile-label">Brand and type</span><strong>{application.brand_name}</strong><small>{application.class_type}</small></div>
                   <div><span className="mobile-label">Status</span><StatusBadge status={application.status} /></div>
                   {complete ? (
-                    <div className="completion-label"><span className="mobile-label">Action</span><strong>Complete</strong></div>
+                    <button className="completion-link" onClick={() => goTo(`/completed/${encodeURIComponent(application.application_id)}`)}>
+                      <span className="mobile-label">Action</span>View complete
+                    </button>
                   ) : (
                     <button className="open-button" onClick={() => goTo(`/review/${encodeURIComponent(application.application_id)}`)}>Open review</button>
                   )}
@@ -366,7 +380,17 @@ function Dashboard() {
   );
 }
 
-function ComparisonResult({ result }: { result: VerificationResult }) {
+function ComparisonResult({
+  result,
+  reviewNote,
+  noteDisabled,
+  onReviewNoteChange,
+}: {
+  result: VerificationResult;
+  reviewNote: string;
+  noteDisabled: boolean;
+  onReviewNoteChange: (reviewNote: string) => void;
+}) {
   const approved = result.verdict === "PASS";
   return (
     <section className="results" aria-labelledby="results-title">
@@ -380,26 +404,37 @@ function ComparisonResult({ result }: { result: VerificationResult }) {
         </span>
       </div>
       <div className="result-list">
-        {result.fields.map((field) => {
-          const needsAttention = field.outcome !== "PASS";
-          return (
-            <article className={`result-card result-${field.outcome.toLowerCase()}`} key={field.field}>
+        {result.fields.map((field) => (
+            <article className={`result-card result-${field.outcome.toLowerCase()}${field.field === "government_warning" ? " result-government-warning" : ""}`} key={field.field}>
               <div className="result-heading">
                 <h4>{FIELD_LABELS[field.field] ?? field.field}</h4>
                 <span>{field.outcome === "PASS" ? "PASS" : field.outcome === "FAIL" ? "FAIL" : "CHECK"}</span>
               </div>
-              <p>{needsAttention ? "The label does not clearly match the application." : "The label matches the application."}</p>
-              {needsAttention && (
-                <dl className="comparison-values">
-                  <div><dt>Application says</dt><dd title={field.expected_value}>{field.expected_value}</dd></div>
-                  <div><dt>Label shows</dt><dd title={field.extracted_value ?? "Nothing could be read"}>{field.extracted_value ?? "Nothing could be read"}</dd></div>
-                </dl>
-              )}
+              <dl className="comparison-values">
+                <div><dt>Application says</dt><dd title={field.expected_value}>{field.expected_value}</dd></div>
+                <div><dt>Label shows</dt><dd title={field.extracted_value ?? "Nothing could be read"}>{field.extracted_value ?? "Nothing could be read"}</dd></div>
+              </dl>
             </article>
-          );
-        })}
+        ))}
+        <section className="review-note-card result-review-note" aria-labelledby="review-note-title">
+          <div>
+            <label id="review-note-title" htmlFor={`review-note-${result.application_id}`}>Reviewer note</label>
+            <span>{reviewNote.length}/{MAX_REVIEW_NOTE_LENGTH}</span>
+          </div>
+          <textarea
+            id={`review-note-${result.application_id}`}
+            value={reviewNote}
+            maxLength={MAX_REVIEW_NOTE_LENGTH}
+            disabled={noteDisabled}
+            placeholder="Add context for this acceptance or rejection."
+            onChange={(event) => onReviewNoteChange(event.target.value)}
+          />
+          <p>{noteDisabled ? "This note was saved with the decision." : "Saved to the review CSV with this application's decision."}</p>
+        </section>
       </div>
-      <p className="latency-note">Completed in {(result.latency_ms / 1000).toFixed(1)} seconds.</p>
+      <p className={`latency-note${result.latency_ms > VERIFICATION_BUDGET_MS ? " latency-note-over-budget" : ""}`}>
+        Completed in {(result.latency_ms / 1000).toFixed(1)} seconds.
+      </p>
     </section>
   );
 }
@@ -515,12 +550,20 @@ function ResultsPage({
   const [decisionError, setDecisionError] = useState<string | null>(null);
   const [activeId, setActiveId] = useState(items[0]?.application_id ?? applicationId);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(
-    () => new Set(items.map((item) => item.application_id)),
+    () => new Set(
+      items
+        .filter((item) => item.result?.verdict === "PASS")
+        .map((item) => item.application_id),
+    ),
   );
   const [decisions, setDecisions] = useState<Record<string, ReviewStatus>>({});
+  const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
+  const [pendingDecision, setPendingDecision] = useState<{
+    decision: "ACCEPTED" | "REJECTED";
+    applicationIds: string[];
+  } | null>(null);
 
-  const saveDecisions = async (decision: "ACCEPTED" | "REJECTED") => {
-    const applicationIds = [...selectedIds];
+  const saveDecisions = async (decision: "ACCEPTED" | "REJECTED", applicationIds: string[]) => {
     if (applicationIds.length === 0) {
       setDecisionError("Select at least one application first.");
       return;
@@ -530,7 +573,11 @@ function ResultsPage({
     const outcomes = await Promise.allSettled(applicationIds.map((id) =>
       requestJson<ApplicationListItem>(`/applications/${encodeURIComponent(id)}/decision`, {
         method: "POST",
-        body: JSON.stringify({ decision }),
+        body: JSON.stringify({
+          decision,
+          review_note: reviewNotes[id] ?? "",
+          verification_item: items.find((item) => item.application_id === id) ?? null,
+        }),
       }),
     ));
     const savedIds = applicationIds.filter((_, index) => outcomes[index].status === "fulfilled");
@@ -544,6 +591,7 @@ function ResultsPage({
       setDecisionError(`${failedCount} decision${failedCount === 1 ? "" : "s"} could not be saved. Please try again.`);
     }
     setSaving(false);
+    if (failedCount === 0 && savedIds.length === undecidedItems.length) goTo("/");
   };
 
   const toggleSelected = (id: string) => {
@@ -554,9 +602,13 @@ function ResultsPage({
     });
   };
 
+  const updateReviewNote = (id: string, reviewNote: string) => {
+    setReviewNotes((current) => ({ ...current, [id]: reviewNote }));
+  };
+
   const undecidedItems = items.filter((item) => (decisions[item.application_id] ?? "PENDING") === "PENDING");
   const allSelected = undecidedItems.length > 0 && undecidedItems.every((item) => selectedIds.has(item.application_id));
-  const activeItem = items.find((item) => item.application_id === activeId) ?? items[0];
+  const activeItem = undecidedItems.find((item) => item.application_id === activeId) ?? undecidedItems[0];
 
   return (
     <>
@@ -594,49 +646,172 @@ function ResultsPage({
               </label>
               <span>{selectedIds.size} selected</span>
               <div className="batch-actions">
-                <button className="accept-button" disabled={saving || selectedIds.size === 0} onClick={() => void saveDecisions("ACCEPTED")}>Accept selected</button>
-                <button className="reject-button" disabled={saving || selectedIds.size === 0} onClick={() => void saveDecisions("REJECTED")}>Reject selected</button>
+                <button className="accept-button" disabled={saving || selectedIds.size === 0} onClick={() => setPendingDecision({ decision: "ACCEPTED", applicationIds: [...selectedIds] })}>Accept selected</button>
+                <button className="reject-button" disabled={saving || selectedIds.size === 0} onClick={() => setPendingDecision({ decision: "REJECTED", applicationIds: [...selectedIds] })}>Reject selected</button>
               </div>
             </section>
             <div className="batch-workspace">
-              <aside className="results-queue" aria-label="Applications with results">
-                {items.map((item) => {
-                  const status = decisions[item.application_id] ?? "PENDING";
-                  const passed = item.result?.verdict === "PASS";
-                  const decided = status !== "PENDING";
-                  return (
-                    <article className={`queue-item ${activeItem?.application_id === item.application_id ? "queue-item-active" : ""} ${decided ? `queue-item-decided queue-item-${status.toLowerCase()}` : ""}`} key={item.application_id}>
-                      <label className="queue-select" aria-label={`Select application ${item.application_id}`}>
-                        <input type="checkbox" disabled={decided} checked={selectedIds.has(item.application_id)} onChange={() => toggleSelected(item.application_id)} />
-                      </label>
-                      <button className="queue-open" onClick={() => setActiveId(item.application_id)} aria-label={`View results for ${item.application_id}; ${STATUS_LABELS[status]}`}>
-                        <strong>{item.application_id}</strong>
-                        <span className={`verdict-chip ${passed ? "verdict-approved" : "verdict-review"}`}>
-                          {passed ? "APPROVED" : "NEEDS REVIEW"}
-                        </span>
-                        <StatusBadge status={status} />
-                      </button>
-                    </article>
-                  );
-                })}
+              <aside className="results-sidebar" aria-label="Applications and current label">
+                <div className="results-queue" aria-label="Applications with results">
+                  {undecidedItems.length === 0 && <p className="queue-empty">All applications have been decided.</p>}
+                  {undecidedItems.map((item) => {
+                    const status = decisions[item.application_id] ?? "PENDING";
+                    const passed = item.result?.verdict === "PASS";
+                    const decided = status !== "PENDING";
+                    return (
+                      <article className={`queue-item ${activeItem?.application_id === item.application_id ? "queue-item-active" : ""} ${decided ? `queue-item-decided queue-item-${status.toLowerCase()}` : ""}`} key={item.application_id}>
+                        <label className="queue-select" aria-label={`Select application ${item.application_id}`}>
+                          <input type="checkbox" disabled={decided} checked={selectedIds.has(item.application_id)} onChange={() => toggleSelected(item.application_id)} />
+                        </label>
+                        <button className="queue-open" onClick={() => setActiveId(item.application_id)} aria-label={`View results for ${item.application_id}; ${STATUS_LABELS[status]}`}>
+                          <strong>{item.application_id}</strong>
+                          <span className={`verdict-chip ${passed ? "verdict-approved" : "verdict-review"}`}>
+                            {passed ? "APPROVED" : "NEEDS REVIEW"}
+                          </span>
+                          <StatusBadge status={status} />
+                        </button>
+                      </article>
+                    );
+                  })}
+                </div>
+                {activeItem && (
+                  <section className="results-label-preview" aria-labelledby="current-label-title">
+                    <h2 id="current-label-title">Current label</h2>
+                    <img
+                      src={`${API_BASE}/applications/${encodeURIComponent(activeItem.application_id)}/image`}
+                      alt={`Label for application ${activeItem.application_id}`}
+                    />
+                  </section>
+                )}
               </aside>
-              {activeItem?.result ? (
-                <ComparisonResult result={activeItem.result} />
-              ) : activeItem?.error ? (
-                <section className="results item-error-detail" aria-labelledby="item-error-title">
-                  <div className="field-results-heading">
-                    <div><p className="eyebrow">Application {activeItem.application_id}</p><h2 id="item-error-title">Label needs review</h2></div>
-                    <span className="verdict-chip verdict-review">NEEDS REVIEW</span>
-                  </div>
-                  <div className="error-notice" role="alert"><strong>This label could not be processed</strong><p>{activeItem.error.message}</p></div>
-                  <p>Select another application to view its field-by-field results, or retry this application from the dashboard.</p>
-                </section>
-              ) : null}
+              <div className="results-detail-column">
+                {activeItem?.result ? (
+                  <ComparisonResult
+                    result={activeItem.result}
+                    reviewNote={reviewNotes[activeItem.application_id] ?? ""}
+                    noteDisabled={(decisions[activeItem.application_id] ?? "PENDING") !== "PENDING"}
+                    onReviewNoteChange={(reviewNote) => updateReviewNote(activeItem.application_id, reviewNote)}
+                  />
+                ) : activeItem?.error ? (
+                  <section className="results item-error-detail" aria-labelledby="item-error-title">
+                    <div className="field-results-heading">
+                      <div><p className="eyebrow">Application {activeItem.application_id}</p><h2 id="item-error-title">Label needs review</h2></div>
+                      <span className="verdict-chip verdict-review">NEEDS REVIEW</span>
+                    </div>
+                    <div className="error-notice" role="alert"><strong>This label could not be processed</strong><p>{activeItem.error.message}</p></div>
+                    <p>Select another application to view its field-by-field results, or retry this application from the dashboard.</p>
+                  </section>
+                ) : null}
+              </div>
             </div>
             <div className="batch-footer">
               {decisionError && <ErrorNotice message={decisionError} />}
               <span role="status">{saving ? "Saving decisions…" : "Decisions are saved as you make them."}</span>
               <button className="secondary-button" onClick={() => goTo("/")}>Return to applications</button>
+            </div>
+            {pendingDecision && (
+              <div className="decision-modal-backdrop" role="presentation">
+                <section className="decision-modal" role="dialog" aria-modal="true" aria-labelledby="decision-modal-title">
+                  <p className="eyebrow">Confirm decision</p>
+                  <h2 id="decision-modal-title">
+                    {pendingDecision.decision === "ACCEPTED" ? "Approve" : "Reject"} these applications?
+                  </h2>
+                  <ul>{pendingDecision.applicationIds.map((id) => <li key={id}>{id}</li>)}</ul>
+                  <div className="decision-modal-actions">
+                    <button className="secondary-button" onClick={() => setPendingDecision(null)}>Cancel</button>
+                    <button
+                      className={pendingDecision.decision === "ACCEPTED" ? "accept-button" : "reject-button"}
+                      onClick={() => {
+                        const pending = pendingDecision;
+                        setPendingDecision(null);
+                        void saveDecisions(pending.decision, pending.applicationIds);
+                      }}
+                    >
+                      {pendingDecision.decision === "ACCEPTED" ? "Approve applications" : "Reject applications"}
+                    </button>
+                  </div>
+                </section>
+              </div>
+            )}
+          </>
+        )}
+      </main>
+    </>
+  );
+}
+
+function CompletedReviewPage({ applicationId }: { applicationId: string }) {
+  const [saved, setSaved] = useState<SavedReview | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setSaved(await requestJson<SavedReview>(`/applications/${encodeURIComponent(applicationId)}/review`));
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "The completed review could not be loaded.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { void load(); }, [applicationId]);
+  const item = saved?.verification_item;
+
+  return (
+    <>
+      <PageHeader />
+      <main id="main-content" className="page-width page-main results-screen">
+        <div className="results-topline">
+          <div>
+            <p className="eyebrow">Completed application {applicationId}</p>
+            <h1>Saved review</h1>
+          </div>
+          <button className="finish-review-button" onClick={() => goTo("/")}>Return to applications</button>
+        </div>
+        {loading ? (
+          <div className="loading-panel" role="status"><span className="spinner" />Loading saved review…</div>
+        ) : error ? (
+          <ErrorNotice message={error} retry={() => void load()} />
+        ) : saved && (
+          <>
+            <section className="completed-review-heading">
+              <div><span>Final reviewer decision</span><StatusBadge status={saved.status} /></div>
+              <p>This decision and its saved verification details are read-only.</p>
+            </section>
+            <div className="batch-workspace completed-workspace">
+              <aside className="results-sidebar" aria-label="Saved label image">
+                <section className="results-label-preview">
+                  <h2>Label image</h2>
+                  <img
+                    src={`${API_BASE}/applications/${encodeURIComponent(applicationId)}/image`}
+                    alt={`Label for application ${applicationId}`}
+                  />
+                </section>
+              </aside>
+              <div className="results-detail-column">
+                {item?.result ? (
+                  <ComparisonResult
+                    result={item.result}
+                    reviewNote={saved.review_note}
+                    noteDisabled={true}
+                    onReviewNoteChange={() => undefined}
+                  />
+                ) : item?.error ? (
+                  <section className="results item-error-detail">
+                    <h2>Saved verification error</h2>
+                    <ErrorNotice message={item.error.message} />
+                    <section className="review-note-card">
+                      <label htmlFor="saved-review-note">Reviewer note</label>
+                      <textarea id="saved-review-note" value={saved.review_note} disabled readOnly />
+                    </section>
+                  </section>
+                ) : (
+                  <ErrorNotice message="Verification details were not saved for this older decision. The final reviewer decision is still shown above." />
+                )}
+              </div>
             </div>
           </>
         )}
@@ -664,6 +839,8 @@ export function App() {
         <ReviewPage applicationId={route.applicationId} />
       ) : route.page === "results" ? (
         <ResultsPage applicationId={route.applicationId} items={route.items} summary={route.summary} />
+      ) : route.page === "completed" ? (
+        <CompletedReviewPage applicationId={route.applicationId} />
       ) : (
         <Dashboard />
       )}

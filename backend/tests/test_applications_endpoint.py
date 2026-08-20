@@ -52,16 +52,37 @@ class StubImages:
 class StubStatuses:
     def __init__(self) -> None:
         self.values: dict[str, ReviewStatus] = {"TTB-0002": ReviewStatus.REJECTED}
+        self.notes: dict[str, str] = {}
+        self.verifications: dict[str, str] = {}
 
     def get_all(self) -> dict[str, ReviewStatus]:
         return dict(self.values)
 
-    def set(self, application_id: str, status: ReviewStatus) -> None:
+    def get(self, application_id: str) -> tuple[ReviewStatus, str, str] | None:
+        if application_id not in self.values:
+            return None
+        return (
+            self.values[application_id],
+            self.notes.get(application_id, ""),
+            self.verifications.get(application_id, ""),
+        )
+
+    def set(
+        self,
+        application_id: str,
+        status: ReviewStatus,
+        review_note: str = "",
+        verification_result: str = "",
+    ) -> None:
         self.values[application_id] = status
+        self.notes[application_id] = review_note
+        self.verifications[application_id] = verification_result
 
     def reset(self) -> int:
         count = len(self.values)
         self.values.clear()
+        self.notes.clear()
+        self.verifications.clear()
         return count
 
 
@@ -122,12 +143,22 @@ def test_save_review_decision_updates_dashboard_status(
 ) -> None:
     response = TestClient(app).post(
         "/applications/TTB-0001/decision",
-        json={"decision": decision},
+        json={"decision": decision, "review_note": "Checked against source record."},
     )
 
     assert response.status_code == 200
     assert response.json()["status"] == decision
     assert configure_dependencies.values["TTB-0001"].value == decision
+    assert configure_dependencies.notes["TTB-0001"] == "Checked against source record."
+
+
+def test_review_decision_rejects_note_over_character_limit() -> None:
+    response = TestClient(app).post(
+        "/applications/TTB-0001/decision",
+        json={"decision": "ACCEPTED", "review_note": "x" * 2001},
+    )
+
+    assert response.status_code == 422
 
 
 def test_reset_statuses_returns_every_application_to_pending(

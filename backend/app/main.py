@@ -20,6 +20,20 @@ VERIFICATION_BUDGET_MS = 5000.0
 
 
 @app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+    )
+    if request.url.path.startswith(("/verify", "/applications")):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.middleware("http")
 async def measure_verification_request(request: Request, call_next):
     if request.url.path not in {"/verify", "/verify/batch"}:
         return await call_next(request)
@@ -94,7 +108,12 @@ if frontend_dist.exists():
 
     @app.get("/{path:path}")
     async def frontend(path: str) -> FileResponse:
-        requested_file = frontend_dist / path
+        resolved_dist = frontend_dist.resolve()
+        requested_file = (resolved_dist / path).resolve()
+        try:
+            requested_file.relative_to(resolved_dist)
+        except ValueError:
+            requested_file = resolved_dist / "index.html"
         if path and requested_file.is_file():
             return FileResponse(requested_file)
         return FileResponse(frontend_dist / "index.html")

@@ -82,6 +82,33 @@ def test_fuzzy_fields_normalize_and_match(comparison, expected, extracted) -> No
     assert result.score >= FUZZY_MATCH_THRESHOLD
 
 
+@pytest.mark.parametrize(
+    ("expected", "extracted"),
+    [
+        ("North Coast Spirits", "PRODUCED BY NORTH COAST SPIRITS"),
+        ("BOTTLED BY Copper Mesa Imports", "Copper Mesa Imports"),
+        (
+            "Maison Roselier",
+            "PRODUCED AND BOTTLED BY MAISON ROSELIER",
+        ),
+        ("Coastal Reserve Trading Co.", "IMPORTED BY COASTAL RESERVE TRADING CO."),
+    ],
+)
+def test_producer_ignores_recognized_leading_role_phrases(
+    expected: str, extracted: str
+) -> None:
+    result = compare_producer(expected, extracted)
+
+    assert result.outcome is FieldOutcome.PASS
+    assert result.score == 100
+
+
+def test_producer_does_not_strip_unrecognized_by_or_of_words() -> None:
+    result = compare_producer("House of Spirits", "Spirits")
+
+    assert result.outcome is FieldOutcome.FAIL
+
+
 def test_fuzzy_field_below_threshold_fails() -> None:
     result = compare_brand_name("Old Harbor", "Completely Different Brand")
 
@@ -110,6 +137,24 @@ def test_country_normalizes_known_synonyms(expected: str, extracted: str) -> Non
 
     assert result.outcome is FieldOutcome.PASS
     assert result.strategy == "country_synonym_exact"
+
+
+@pytest.mark.parametrize(
+    ("expected", "extracted"),
+    [
+        ("Mexico", "PRODUCT OF MEXICO"),
+        ("PRODUCT OF FRANCE", "France"),
+        ("Japan", "MADE IN JAPAN"),
+        ("United States", "PRODUCED IN USA"),
+        ("Barbados", "IMPORTED FROM BARBADOS"),
+    ],
+)
+def test_country_ignores_recognized_leading_origin_phrases(
+    expected: str, extracted: str
+) -> None:
+    result = compare_country_of_origin(expected, extracted)
+
+    assert result.outcome is FieldOutcome.PASS
 
 
 def test_country_does_not_use_fuzzy_matching() -> None:

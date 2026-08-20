@@ -37,6 +37,17 @@ _VOLUME_PATTERN = re.compile(
     r"millilit(?:ers?|res?)|ml|centilit(?:ers?|res?)|cl|"
     r"lit(?:ers?|res?)|l)\b"
 )
+_PRODUCER_ROLE = (
+    r"(?:produced|distilled|bottled|imported|manufactured|distributed|"
+    r"blended|vinted|cellared)"
+)
+_PRODUCER_PREFIX_PATTERN = re.compile(
+    rf"^{_PRODUCER_ROLE}(?:\s+(?:and\s+)?{_PRODUCER_ROLE})*\s+by\s+"
+)
+_COUNTRY_PREFIX_PATTERN = re.compile(
+    r"^(?:product\s+of|made\s+in|produced\s+in|bottled\s+in|"
+    r"imported\s+from)\s+"
+)
 
 _COUNTRY_ALIASES = {
     "america": "united states",
@@ -86,6 +97,11 @@ def _collapse_whitespace(value: str) -> str:
     return " ".join(value.split())
 
 
+def _normalize_producer(value: str) -> str:
+    normalized = _normalize_words(value)
+    return _PRODUCER_PREFIX_PATTERN.sub("", normalized, count=1)
+
+
 def _missing_result(
     field: FieldName, expected: str, extracted: str | None, strategy: str
 ) -> FieldResult | None:
@@ -102,15 +118,19 @@ def _missing_result(
 
 
 def _compare_fuzzy(
-    field: FieldName, expected: str, extracted: str | None
+    field: FieldName,
+    expected: str,
+    extracted: str | None,
+    *,
+    normalize: Callable[[str], str] = _normalize_words,
 ) -> FieldResult:
     strategy = f"fuzzy_ratio>={FUZZY_MATCH_THRESHOLD:g}"
     if missing := _missing_result(field, expected, extracted, strategy):
         return missing
 
     assert extracted is not None
-    normalized_expected = _normalize_words(expected)
-    normalized_extracted = _normalize_words(extracted)
+    normalized_expected = normalize(expected)
+    normalized_extracted = normalize(extracted)
     score = SequenceMatcher(
         None, normalized_expected, normalized_extracted, autojunk=False
     ).ratio() * 100
@@ -139,11 +159,17 @@ def compare_class_type(expected: str, extracted: str | None) -> FieldResult:
 
 
 def compare_producer(expected: str, extracted: str | None) -> FieldResult:
-    return _compare_fuzzy(FieldName.PRODUCER, expected, extracted)
+    return _compare_fuzzy(
+        FieldName.PRODUCER,
+        expected,
+        extracted,
+        normalize=_normalize_producer,
+    )
 
 
 def _normalize_country(value: str) -> str:
     normalized = _normalize_words(value)
+    normalized = _COUNTRY_PREFIX_PATTERN.sub("", normalized, count=1)
     return _COUNTRY_ALIASES.get(normalized, normalized)
 
 

@@ -153,3 +153,26 @@ def test_review_statuses_are_separate_and_resettable(tmp_path) -> None:
     }
     assert repository.reset() == 2
     assert repository.get_all() == {}
+
+
+def test_review_status_csv_persists_reviewer_note(tmp_path) -> None:
+    status_path = tmp_path / "review_status.csv"
+    repository = CsvReviewStatusRepository(status_path)
+
+    repository.set(
+        "TTB-0001",
+        ReviewStatus.ACCEPTED,
+        "Warning verified against the label.",
+    )
+
+    with status_path.open(newline="", encoding="utf-8") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+    assert rows == [
+        {
+            "application_id": "TTB-0001",
+            "status": "ACCEPTED",
+            "review_note": "Warning verified against the label.",
+            "verification_result": "",
+        }
+    ]
+    assert repository.get_all() == {"TTB-0001": ReviewStatus.ACCEPTED}

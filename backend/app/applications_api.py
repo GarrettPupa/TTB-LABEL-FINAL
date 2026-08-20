@@ -18,9 +18,11 @@ from backend.app.models import (
     ApplicationData,
     ApplicationDetail,
     ApplicationListItem,
+    BatchVerificationItem,
     ResetStatusesResponse,
     ReviewDecisionRequest,
     ReviewStatus,
+    SavedReviewResponse,
 )
 from backend.app.verification_api import get_application_repository, get_image_store
 
@@ -148,8 +150,55 @@ def save_review_decision(
 ) -> ApplicationListItem:
     application = _require_application(applications, application_id)
     status = ReviewStatus(request.decision.value)
+    if (
+        request.verification_item is not None
+        and request.verification_item.application_id != application_id
+    ):
+        raise ApiError(
+            422,
+            "verification_application_mismatch",
+            "The saved verification does not match this application.",
+        )
     try:
-        statuses.set(application_id, status)
+        statuses.set(
+            application_id,
+            status,
+            request.review_note,
+            request.verification_item.model_dump_json()
+            if request.verification_item is not None
+            else "",
+        )
     except SourceDataError as exc:
         _raise_source_error(exc)
     return _list_item(application, status)
+
+
+@router.get("/{application_id}/review", response_model=SavedReviewResponse)
+def get_saved_review(
+    application_id: str,
+    applications: Annotated[ApplicationRepository, Depends(get_application_repository)],
+    statuses: Annotated[ReviewStatusRepository, Depends(get_review_status_repository)],
+) -> SavedReviewResponse:
+    _require_application(applications, application_id)
+    try:
+        saved = statuses.get(application_id)
+    except SourceDataError as exc:
+        _raise_source_error(exc)
+    if saved is None:
+        raise ApiError(
+            404,
+            "review_not_found",
+            "No completed review was found for this application.",
+        )
+    status, review_note, verification_json = saved
+    verification_item = (
+        BatchVerificationItem.model_validate_json(verification_json)
+        if verification_json
+        else None
+    )
+    return SavedReviewResponse(
+        application_id=application_id,
+        status=status,
+        review_note=review_note,
+        verification_item=verification_item,
+    )

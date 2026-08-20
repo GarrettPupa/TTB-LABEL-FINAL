@@ -85,7 +85,15 @@ class ImageStore(Protocol):
 class ReviewStatusRepository(Protocol):
     def get_all(self) -> dict[str, ReviewStatus]: ...
 
-    def set(self, application_id: str, status: ReviewStatus) -> None: ...
+    def get(self, application_id: str) -> tuple[ReviewStatus, str, str] | None: ...
+
+    def set(
+        self,
+        application_id: str,
+        status: ReviewStatus,
+        review_note: str = "",
+        verification_result: str = "",
+    ) -> None: ...
 
     def reset(self) -> int: ...
 
@@ -216,13 +224,26 @@ class CsvReviewStatusRepository:
 
     def get_all(self) -> dict[str, ReviewStatus]:
         with self._lock:
-            return self._read_unlocked()
+            return {
+                application_id: record[0]
+                for application_id, record in self._read_unlocked().items()
+            }
 
-    def set(self, application_id: str, status: ReviewStatus) -> None:
+    def get(self, application_id: str) -> tuple[ReviewStatus, str, str] | None:
         with self._lock:
-            statuses = self._read_unlocked()
-            statuses[application_id] = status
-            self._write_unlocked(statuses)
+            return self._read_unlocked().get(application_id)
+
+    def set(
+        self,
+        application_id: str,
+        status: ReviewStatus,
+        review_note: str = "",
+        verification_result: str = "",
+    ) -> None:
+        with self._lock:
+            records = self._read_unlocked()
+            records[application_id] = (status, review_note, verification_result)
+            self._write_unlocked(records)
 
     def reset(self) -> int:
         with self._lock:
@@ -230,27 +251,38 @@ class CsvReviewStatusRepository:
             self._write_unlocked({})
             return count
 
-    def _read_unlocked(self) -> dict[str, ReviewStatus]:
+    def _read_unlocked(self) -> dict[str, tuple[ReviewStatus, str, str]]:
         if not self._status_path.exists():
             return {}
         try:
             with self._status_path.open(newline="", encoding="utf-8-sig") as csv_file:
                 reader = csv.DictReader(csv_file)
-                if reader.fieldnames != ["application_id", "status"]:
+                if reader.fieldnames not in (
+                    ["application_id", "status"],
+                    ["application_id", "status", "review_note"],
+                    ["application_id", "status", "review_note", "verification_result"],
+                ):
                     raise ApplicationDataUnavailableError()
-                statuses: dict[str, ReviewStatus] = {}
+                records: dict[str, tuple[ReviewStatus, str, str]] = {}
                 for row in reader:
                     try:
-                        statuses[row["application_id"]] = ReviewStatus(row["status"])
+                        records[row["application_id"]] = (
+                            ReviewStatus(row["status"]),
+                            row.get("review_note", "") or "",
+                            row.get("verification_result", "") or "",
+                        )
                     except (KeyError, ValueError) as exc:
                         raise ApplicationDataUnavailableError() from exc
-                return statuses
+                return records
         except SourceDataError:
             raise
         except (OSError, UnicodeError, csv.Error) as exc:
             raise ApplicationDataUnavailableError() from exc
 
-    def _write_unlocked(self, statuses: dict[str, ReviewStatus]) -> None:
+    def _write_unlocked(
+        self,
+        records: dict[str, tuple[ReviewStatus, str, str]],
+    ) -> None:
         temporary_path: Path | None = None
         try:
             self._status_path.parent.mkdir(parents=True, exist_ok=True)
@@ -264,14 +296,17 @@ class CsvReviewStatusRepository:
                 temporary_path = Path(temporary_file.name)
                 writer = csv.DictWriter(
                     temporary_file,
-                    fieldnames=["application_id", "status"],
+                    fieldnames=["application_id", "status", "review_note", "verification_result"],
                 )
                 writer.writeheader()
-                for application_id in sorted(statuses):
+                for application_id in sorted(records):
+                    status, review_note, verification_result = records[application_id]
                     writer.writerow(
                         {
                             "application_id": application_id,
-                            "status": statuses[application_id].value,
+                            "status": status.value,
+                            "review_note": review_note,
+                            "verification_result": verification_result,
                         }
                     )
             os.replace(temporary_path, self._status_path)

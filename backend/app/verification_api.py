@@ -31,6 +31,7 @@ from backend.app.models import (
 from backend.app.vision import (
     FakeVisionService,
     OpenAIVisionService,
+    VisionConfigurationError,
     VisionService,
     VisionServiceError,
     VisionTimeoutError,
@@ -121,6 +122,14 @@ def _verify_application(
 
     try:
         extracted = vision.extract_label(image)
+    except VisionConfigurationError:
+        raise ApiError(
+            status_code=503,
+            code="vision_not_configured",
+            public_message=(
+                "Label analysis is not configured. Please contact the administrator."
+            ),
+        ) from None
     except VisionTimeoutError:
         raise ApiError(
             status_code=504,

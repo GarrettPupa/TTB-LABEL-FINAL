@@ -19,7 +19,7 @@ from backend.app.verification_api import (
     get_image_store,
     get_vision_service,
 )
-from backend.app.vision import FakeVisionService
+from backend.app.vision import FakeVisionService, VisionConfigurationError
 from backend.app.vision import VisionTimeoutError
 
 
@@ -105,6 +105,11 @@ class TimeoutVisionService:
         raise VisionTimeoutError("provider timed out")
 
 
+class UnconfiguredVisionService:
+    def extract_label(self, image: bytes) -> ExtractedLabel:
+        raise VisionConfigurationError("do-not-expose-provider-details")
+
+
 @pytest.fixture(autouse=True)
 def clear_dependency_overrides() -> None:
     app.dependency_overrides.clear()
@@ -137,6 +142,7 @@ def test_verify_returns_full_verification_result_using_selected_application() ->
     response = TestClient(app).post("/verify", json={"application_id": "TTB-0001"})
 
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
     body = response.json()
     assert body["application_id"] == "TTB-0001"
     assert body["verdict"] == "PASS"
@@ -313,6 +319,25 @@ def test_verify_returns_readable_gateway_timeout() -> None:
             "message": "Label analysis timed out. Please try again.",
         }
     }
+    assert "traceback" not in response.text.lower()
+
+
+def test_verify_returns_readable_error_when_vision_is_not_configured() -> None:
+    configure_dependencies(vision_service=UnconfiguredVisionService())
+
+    response = TestClient(app).post("/verify", json={"application_id": "TTB-0001"})
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "error": {
+            "code": "vision_not_configured",
+            "message": (
+                "Label analysis is not configured. Please contact the administrator."
+            ),
+        }
+    }
+    assert "do-not-expose-provider-details" not in response.text
+    assert "OPENAI_API_KEY" not in response.text
     assert "traceback" not in response.text.lower()
 
 
